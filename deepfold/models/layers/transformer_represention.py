@@ -80,9 +80,36 @@ class AttentionPooling2(nn.Module):
             pass
         att_net = self.softmax(att_net)
 
-        att_net = torch.sum(all_hidden_states * att_net, 1)  # batch_size*seq_len*1
+        att_net = torch.sum(att_net * all_hidden_states, 1)  # batch_size*seq_len*1
 
         return att_net
+        
+        
+class SelfAttentionPooling(nn.Module):
+    def __init__(self, hidden_size, seq_len=1024, dropout_rate=0.):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.dropout_rate = dropout_rate
+        self.seq_len = seq_len
+        
+        self.q = nn.Linear(self.hidden_size, self.hidden_size // 2)
+        self.k = nn.Linear(self.hidden_size, self.hidden_size // 2)
+        self.att = nn.Linear(self.seq_len, 1)
+        self.dropout = nn.Dropout(self.dropout_rate)
+
+    def forward(self, all_hidden_states, item_seq=None):
+        q = self.q(all_hidden_states)
+        k = self.k(all_hidden_states)
+        k = torch.transpose(k, 1, 2)
+        q = torch.matmul(q,k)  # batch_size*seq_len*seq_len
+        q = torch.softmax(q, dim=-1)
+        q = self.dropout(q)
+        q = self.att(q)  # batch_size*seq_len*1
+        q = torch.softmax(q, dim=1)
+
+        q = torch.sum(q*all_hidden_states, 1)  # batch_size*seq_len
+
+        return q
 
 
 class WKPooling(nn.Module):
