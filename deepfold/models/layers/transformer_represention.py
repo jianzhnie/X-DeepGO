@@ -24,6 +24,30 @@ class CNNPooler(nn.Module):
         return cnn_embeddings
 
 
+class SelfAttentionPooling(nn.Module):
+    def __init__(self, hidden_size, seq_len=1024, dropout_rate=0.) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.dropout_rate = dropout_rate
+        self.seq_len = seq_len
+
+        self.q = nn.Linear(self.hidden_size, self.hidden_size // 2)
+        self.k = nn.Linear(self.hidden_size, self.hidden_size // 2)
+        self.att = nn.Linear(self.seq_len, 1)
+        self.dropout = nn.Dropout(self.dropout_rate)
+
+    def forward(self, all_hidden_states, item_seq=None):
+        q = self.q(all_hidden_states)
+        k = self.k(all_hidden_states)
+        k = torch.transpose(k, 1, 2)
+        q = torch.matmul(q, k)
+        q = torch.softmax(q, dim=-1)
+        q = self.att(q)
+        q = torch.softmax(q, dim=1)
+        q = torch.sum(q * all_hidden_states, 1)
+        return q
+
+
 class AttentionPooling(nn.Module):
     def __init__(self, num_layers, hidden_size, hiddendim_fc):
         super(AttentionPooling, self).__init__()
@@ -57,6 +81,33 @@ class AttentionPooling(nn.Module):
         v_temp = torch.matmul(v.unsqueeze(1), h).transpose(-2, -1)
         v = torch.matmul(self.w_h.transpose(1, 0), v_temp).squeeze(2)
         return v
+
+
+class AttentionPooling2(nn.Module):
+    def __init__(self, hidden_size, dropout_rate=0.):
+        super(AttentionPooling2, self).__init__()
+
+        self.hidden_size = hidden_size
+        self.dropout_rate = dropout_rate
+        self.fc1 = nn.Linear(self.hidden_size, self.hidden_size // 2)
+        self.fc2 = nn.Linear(self.hidden_size // 2, 1)
+        self.tanh = nn.Tanh()
+        self.softmax = nn.Softmax(dim=1)
+        self.dropout = nn.Dropout(self.dropout_rate)
+
+    def forward(self, all_hidden_states, item_seq=None):
+        att_net = self.fc1(all_hidden_states)
+        att_net = self.tanh(att_net)
+        att_net = self.dropout(att_net)
+        att_net = self.fc2(att_net)
+        if item_seq is not None:  # padding sequence length
+            pass
+        att_net = self.softmax(att_net)
+
+        att_net = torch.sum(all_hidden_states * att_net,
+                            1)  # batch_size*seq_len*1
+
+        return att_net
 
 
 class WKPooling(nn.Module):

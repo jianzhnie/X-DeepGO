@@ -43,13 +43,14 @@ class EsmDataset(Dataset):
                  data_path: str = 'dataset/',
                  file_name: str = 'xxx.pkl',
                  model_dir: str = 'esm1b_t33_650M_UR50S',
+                 terms_name: str = 'terms.pkl',
                  max_length: int = 1024,
                  truncate: bool = True,
                  random_crop: bool = False):
         super().__init__()
 
         self.file_path = os.path.join(data_path, file_name)
-        self.terms_path = os.path.join(data_path, 'terms.pkl')
+        self.terms_path = os.path.join(data_path, terms_name)
 
         self.seqs, self.labels, self.terms = self.load_dataset(
             self.file_path, self.terms_path)
@@ -123,7 +124,6 @@ class EsmDataset(Dataset):
             sequence = crop_sequence(sequence, crop_length=self.max_length - 2)
         if self.truncate:
             sequence = sequence[:self.max_length - 2]
-
         length = len(sequence)
         label_list = self.labels[idx]
         multilabel = [0] * self.num_classes
@@ -139,7 +139,10 @@ class EsmDataset(Dataset):
         terms = terms_df['terms'].values.flatten()
 
         seq = list(df['sequences'])
-        label = list(df['prop_annotations'])
+        try:
+            label = list(df['prop_annotations'])
+        except:
+            label = list(df['annotations'])
         assert len(seq) == len(label)
         return seq, label, terms
 
@@ -162,6 +165,10 @@ class EsmDataset(Dataset):
         if self.truncate:
             all_tokens = all_tokens[:, :self.max_length]
 
+        if all_tokens.shape[1] < 1024:
+            tmp = torch.ones((all_tokens.shape[0], 1024 - all_tokens.shape[1]))
+            all_tokens = torch.cat([all_tokens, tmp], dim=1)
+        all_tokens = all_tokens.int()
         all_tokens = all_tokens.to('cpu')
         encoded_inputs = {
             'input_ids': all_tokens,
@@ -187,17 +194,33 @@ def crop_sequence(sequence: str, crop_length: int) -> str:
 
 if __name__ == '__main__':
     from torch.utils.data import DataLoader
-    data_root = '/home/niejianzheng/xbiome/datasets/protein'
-    # data_root = '/Users/robin/xbiome/datasets/protein'
-    pro_dataset = EsmDataset(data_path=data_root,
-                             model_dir='esm1b_t33_650M_UR50S')
-    print(pro_dataset.num_classes)
-    data_loader = DataLoader(pro_dataset,
-                             batch_size=8,
-                             collate_fn=pro_dataset.collate_fn)
 
-    for index, batch in enumerate(data_loader):
+    # test 5874 dataset
+    # data_root = '../../data'
+    # # data_root = '/Users/robin/xbiome/datasets/protein'
+    # pro_dataset = EsmDataset(data_path=data_root,
+    #                          model_dir='esm1b_t33_650M_UR50S',
+    #                          file_name='train_data.pkl')
+    # print(pro_dataset.num_classes)
+    # data_loader = DataLoader(pro_dataset,
+    #                          batch_size=8,
+    #                          collate_fn=pro_dataset.collate_fn)
+
+    # for index, batch in enumerate(data_loader):
+    #     for key, val in batch.items():
+    #         print(key, val.shape)
+    #     if index > 10:
+    #         break
+
+    # test CAFA3 dataset
+    mfo_dataset = EsmDataset(data_path='../../data/cafa3/mfo/',
+                             file_name='mfo_train_data.pkl',
+                             terms_name='mfo_terms.pkl')
+    mfo_loader = DataLoader(mfo_dataset,
+                            batch_size=8,
+                            collate_fn=mfo_dataset.collate_fn)
+    for index, batch in enumerate(mfo_loader):
         for key, val in batch.items():
-            print(key, val.shape, val)
+            print(key, val.shape)
         if index > 10:
             break

@@ -37,6 +37,7 @@ class ProtGCNModel(nn.Module):
         # self.gcn = CustomGCN(node_feats, hidden_dim, dropout)
         self.gcn = GCN(node_feats, hidden_dim)
         self.num_labels = self.num_nodes
+        self.fc = nn.Linear(self.num_nodes,self.num_nodes)
 
     def forward(self, embeddings, labels):
         seq_out = self.seq_mlp(embeddings)
@@ -44,7 +45,7 @@ class ProtGCNModel(nn.Module):
         graph_out = self.gcn(node_embd, self.adjMat)
         graph_out = graph_out.transpose(-2, -1)
 
-        logits = torch.matmul(seq_out, graph_out)
+        logits = self.fc(torch.matmul(seq_out, graph_out))
         outputs = (logits, )
         if labels is not None:
             loss_fct = BCEWithLogitsLoss()

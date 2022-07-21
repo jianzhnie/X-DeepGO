@@ -1,10 +1,11 @@
 import math
-
+import esm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn import BCEWithLogitsLoss
+from deepfold.models.esm_model import MLPLayer
 
-from .gnn_model import CustomGCN
 
 
 # attention  module
@@ -48,7 +49,7 @@ class DotProductAttention(nn.Module):
         # 设置transpose_b=True为了交换keys的最后两个维度
         scores = torch.bmm(queries, keys.transpose(1, 2)) / math.sqrt(d)
         self.attention_weights = masked_softmax(scores, valid_lens)
-        return torch.bmm(self.dropout(self.attention_weights), values)
+        return torch.bmm(self.dropout(self.attention_weights), values),self.attention_weights
 
 
 def transpose_qkv(X, num_heads):
@@ -91,7 +92,7 @@ class MultiHeadAttention(nn.Module):
         self.W_v = nn.Linear(value_size, num_hiddens, bias=bias)
         self.W_o = nn.Linear(num_hiddens, num_hiddens, bias=bias)
 
-    def forward(self, queries, keys, values, valid_lens=None):
+    def forward(self, queries, keys, values, valid_lens=None, output_attentions=True):
         # queries，keys，values的形状:
         # (batch_size，查询或者“键－值”对的个数，num_hiddens)
         # valid_lens　的形状:
@@ -112,42 +113,50 @@ class MultiHeadAttention(nn.Module):
 
         # output的形状:(batch_size*num_heads，查询的个数，
         # num_hiddens/num_heads)
-        output = self.attention(queries, keys, values, valid_lens)
+        output,weight = self.attention(queries, keys, values, valid_lens)
 
         # output_concat的形状:(batch_size，查询的个数，num_hiddens)
         output_concat = transpose_output(output, self.num_heads)
-        return self.W_o(output_concat)
+        weight_concat = transpose_output(weight, self.num_heads)
+        outputs = (output_concat, weight_concat) if output_attentions else (output_concat,)
+            
+ 
+        return outputs
 
+class MLPLayer(nn.Module):
+    def __init__(self, input_size=1280, num_labels=10000, dropout_ratio=0.1):
+        super().__init__()
 
-class P2GO(nn.Module):
-    def __init__(self,
-                 backbone,
-                 aa_dim=1280,
-                 latent_dim=128,
-                 dropout_rate=0.1,
-                 n_head=2,
-                 batch_size=4,
-                 nb_classes=5874):
+        self.hidden_size = input_size * 2
+        self.num_labels = num_labels
+        self.fc1 = nn.Linear(input_size, self.hidden_size)
+        self.norm = nn.BatchNorm1d(self.hidden_size)
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(dropout_ratio)
+        self.classifier = nn.Linear(self.hidden_size, num_labels)
+
+    def forward(self, embeddings):
+        out = self.fc1(embeddings)
+        out = out.transpose(-1,-2)
+        out = self.norm(out)
+        out = out.transpose(-1,-2)
+        out = self.relu(out)
+        out = self.dropout(out)
+        logits = self.classifier(out)
+        return logits
+
+class LabelWiseAttentionModel(nn.Module):
+    def __init__(self, aa_dim=1280, latent_dim=512, dropout_rate=0.0,n_head=8,nb_classes=5874,fintune=False):
         super().__init__()
         # backbone
-        self.backbone = backbone
-        for p in self.backbone.parameters():
-            p.requires_grad = False
-        self.batch_size = batch_size
+        self._model, _ = esm.pretrained.load_model_and_alphabet(
+            'esm1b_t33_650M_UR50S')
+
         self.nb_classes = nb_classes
-        # AA_emebdding transform
+        # aa_embedding transform
         self.aa_transform = nn.Linear(aa_dim, latent_dim)
-
         # go embedder
-        self.go_embedder = nn.Sequential(
-            nn.Embedding(self.nb_classes, latent_dim), nn.ReLU(inplace=True))
-        self.fc1 = nn.Linear(latent_dim, self.nb_classes)
-        self.fc2 = nn.Linear(latent_dim, self.nb_classes)
-        self.fc3 = nn.Linear(latent_dim, 3)
-        self.dropout = nn.Dropout(p=dropout_rate)
-        self.nll_loss = nn.NLLLoss()
-        self.cross_entropy = nn.CrossEntropyLoss()
-
+        self.go_embedder = nn.Embedding(nb_classes,latent_dim)
         # label-wise attention
         self.attention = MultiHeadAttention(latent_dim,
                                             latent_dim,
@@ -155,108 +164,93 @@ class P2GO(nn.Module):
                                             latent_dim,
                                             num_heads=n_head,
                                             dropout=dropout_rate)
-        # weight alpha
-        self.alpha = torch.nn.Parameter(torch.ones((1, nb_classes)) * 10000.0,
-                                        requires_grad=True)
+        self.all_gos = nn.Parameter(torch.arange(self.nb_classes),requires_grad=False)
+        # classifier
+        self.fc = MLPLayer(latent_dim, 1)
+        self.fintune = fintune
+        if not self.fintune:
+            self._freeze_backbone()
 
-        # gnn module
-        self.gcn = CustomGCN(latent_dim, latent_dim)
-        # output layer
-        self.go_transform2 = nn.Sequential(
-            nn.Linear(int(2 * latent_dim), latent_dim), nn.ReLU())
+    def _freeze_backbone(self):
+        for p in self._model.parameters():
+            p.requires_grad = False
 
-    def forward(self, x, valid_len, adj, term_ids):
+    def forward(self, input_ids, lengths=None, labels=None, output_attentions=True):
         # backbone
-        x = self.backbone(x, repr_layers=[33])['representations'][33]
+        model_outputs = self._model(
+            input_ids,
+            repr_layers=[33],
+        )
+        x = model_outputs['representations'][33]
         x = x[:, 1:]
         # x [B,L,C]
         # AA_embedding transform
         x = self.aa_transform(x)
-        mean_list = []
-        for i, length in enumerate(list(valid_len)):
-            length = int(length)
-            mean = x[i, :length].mean(axis=0, keepdim=True)
-            mean_list.append(mean)
-        mean_batch = torch.cat(mean_list)
-        mean_embedding = mean_batch.unsqueeze(1)
-        mean_embedding = mean_embedding.repeat((1, self.nb_classes, 1))
-        # go embedder
-        # go_embedding [nb_classes,latent_dim]
-        go_embedding = self.go_embedder(term_ids)
+        # go embedding
+        go_embedding = self.go_embedder(self.all_gos)
         # label-wise attention
         y_embedding = go_embedding.repeat((x.shape[0], 1, 1))
-        label_attn_embedding = self.attention(y_embedding, x, x, valid_len)
-        # feature combination
-        alpha = torch.sigmoid(self.alpha)
-        alpha = alpha.unsqueeze(-1)
-        alpha = alpha.repeat((x.shape[0], 1, label_attn_embedding.shape[2]))
-        label_level_embedding = alpha * label_attn_embedding + (
-            1 - alpha) * mean_embedding
-        # gnn module
-        go_out = self.gcn(go_embedding, adj)
+        label_attn_embedding, weight = self.attention(y_embedding, x, x, lengths)
         # output layer
-        go_out = torch.cat((go_embedding, go_out), dim=1)
-        go_out = self.go_transform2(go_out)
-        go_out = go_out.repeat((x.shape[0], 1, 1))
-        out = torch.sum(go_out * label_level_embedding, dim=-1)
+        logits = self.fc(label_attn_embedding)
+        logits = logits.squeeze(-1)
+        outputs = (logits, )
 
-        return torch.sigmoid(out)
+        if labels is not None:
+            loss_fct = BCEWithLogitsLoss()
+            labels = labels.float()
+            loss = loss_fct(logits.view(-1, self.nb_classes),
+                            labels.view(-1, self.nb_classes))
 
-    def go_loss_fn(self, term_ids, ancesstors, sub_ontology):
-        return self.term_loss_fn(term_ids) + self.anc_loss_fn(
-            term_ids, ancesstors) + self.sub_ont_loss_fn(
-                term_ids, sub_ontology)
+            outputs = (loss, logits)
+        if output_attentions:
+            outputs = (loss, logits, weight)
+        return outputs
 
-    def term_loss_fn(self, term_ids):
-        embeddings = self.go_embedder(term_ids)
-        out1 = self.fc1(embeddings)
-        log_probs_term = F.log_softmax(out1, dim=1)
-        loss_term = self.nll_loss(log_probs_term, term_ids)
-        return loss_term
-
-    def anc_loss_fn(self, term_ids, neighbor_ids):
-        embeddings = self.go_embedder(term_ids)
-        out2 = self.fc2(embeddings)
-        log_probs_neighbor = F.log_softmax(out2, dim=1)
-        loss_neighbor = self.nll_loss(log_probs_neighbor, neighbor_ids)
-        return loss_neighbor
-
-    def sub_ont_loss_fn(self, term_ids, sub_ontology):
-        embeddings = self.go_embedder(term_ids)
-        out3 = self.fc3(embeddings)
-        loss_namespace = F.cross_entropy(out3, sub_ontology)
-        return loss_namespace
 
 
 if __name__ == '__main__':
-    # data, target, valid_len = next(iter(test_dataloader))
-    # data = data.squeeze(1)
-    # target = target.squeeze(1)
-    # device = 'cuda:0'
-    # adj, go_embedding, data, target, valid_len = adj.to(device), go_embedding.to(device), data.to(device), target.to(device), valid_len.to(device)
-    # model = P2GO(backbone=backbone, go_dim=params['go_dim'],aa_dim=params['aa_dim'],
-    #                         latent_dim=params['latent_dim'],dropout_rate=params['dropout_rate'],
-    #                         n_head=params['n_head'],batch_size=params['train_batch_size'],nb_classes=nb_classes)
-    # model = model.to(device)
-    # out = model(data, valid_len, adj, go_embedding)
+# data = torch.randint(low=1,high=20,size=(4,1023))
+# tmp = torch.ones((4,1))*32
+# data = torch.concat((tmp,data),dim=1)
+# data = data.int()
+# data.shape
 
-    # nn.NLLLoss()
-    device = 'cuda:0'
-    embedding = nn.Embedding(5874, 512)
-    fc1 = nn.Linear(512, 5874)
-    fc2 = nn.Linear(512, 5874)
-    fc3 = nn.Linear(512, 3)
+# len_list = [100,150,999,1023]
+# labels = torch.zeros((4,5874))
+# labels = labels.to('cuda:0')
 
-    ids = torch.arange(5874)
-    go_embedding = embedding(ids)
+# backbone, alphabet = esm.pretrained.esm1b_t33_650M_UR50S()
+# model = LabelWiseAttentionModel(backbone)
+# data = data.to('cuda:0')
+# model = model.to('cuda:0')
+# out = model(data,labels=labels)
+    import esm
+    from torch.utils.data import DataLoader
+    from deepfold.data.esm_dataset import EsmDataset
 
-    embedding, fc1, fc2, fc3, ids = embedding.to(device), fc1.to(
-        device), fc2.to(device), fc3.to(device), ids.to(device)
-    go_embedding = go_embedding.to(device)
-    print(go_embedding.shape)
-    out1 = fc1(go_embedding)
-    out2 = fc2(go_embedding)
-    out3 = fc3(go_embedding)
-    print(out1.shape)
-    print(out2.shape)
-    print(out3.shape)
+    # backbone, alphabet = esm.pretrained.esm1b_t33_650M_UR50S()
+    model = LabelWiseAttentionModel()
+    data_path = '../../data'
+    train_dataset = EsmDataset(data_path=data_path,
+                                   file_name='train_data.pkl')
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=4,
+        num_workers=4,
+        collate_fn=train_dataset.collate_fn,
+        pin_memory=True,
+    )
+    for batch in train_loader:
+        data = batch['input_ids']
+        valid_len = batch['lengths']
+        labels = batch['labels']
+        data, valid_len, labels = data.cuda(), valid_len.cuda(), labels.cuda()
+        model = LabelWiseAttentionModel(1280,512,0.0,8,5874)
+        model = model.cuda()
+        outs = model(data,valid_len,labels,True)
+        print(f'loss:{outs[0]}')
+        print(f'logits:{outs[1].shape}')
+        print(f'attention_weights:{outs[2].shape}')
+        break
+

@@ -13,7 +13,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from deepfold.data.gcn_dataset import GCNDataset
-from deepfold.models.multimodal_model import ProtGCNModel
+from deepfold.models.esm_model import MLP
 from deepfold.trainer.training import predict
 from deepfold.utils.make_graph import build_graph
 from deepfold.utils.model import load_model_checkpoint
@@ -79,6 +79,7 @@ def main(args):
     # Dataset and DataLoader
     adj, multi_hot_vector, label_map, label_map_ivs = build_graph(
         data_path=args.data_path, namespace=args.namespace)
+    nb_classes = len(label_map)
     test_dataset = GCNDataset(label_map,
                               root_path=args.data_path,
                               file_name=args.test_file_name)
@@ -92,11 +93,7 @@ def main(args):
     # model
     nodes = multi_hot_vector.cuda()
     adj = adj.cuda()
-    model = ProtGCNModel(nodes=nodes,
-                         adjmat=adj,
-                         seq_dim=1280,
-                         node_feats=512,
-                         hidden_dim=512)
+    model = MLP(1280,nb_classes)
     if args.resume is not None:
         if args.local_rank == 0:
             model_state, optimizer_state = load_model_checkpoint(args.resume)
@@ -119,8 +116,7 @@ def main(args):
     preds, test_labels = predictions
     test_df['labels'] = list(test_labels)
     test_df['preds'] = list(preds)
-    df_path = os.path.join(args.data_path,
-                           args.namespace + '_predictions' + '_less_terms' + '.pkl')
+    df_path = os.path.join(args.data_path, 'withoutGCN' + args.namespace + '_less_terms'+'_predictions.pkl')
     test_df.to_pickle(df_path)
     logger.info(f'Saving results to {df_path}')
 
@@ -147,7 +143,7 @@ if __name__ == '__main__':
     # Cache the args as a text string to save them in the output dir later
     args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
 
-    task_name = 'ProtLM' + '_' + args.namespace + '_' + args.model + 'less_terms'
+    task_name = 'ProtLM' + '_' + 'withoutGCN_' + args.namespace + '_less_terms_' + args.model
     args.output_dir = os.path.join(args.output_dir, task_name)
     if not torch.distributed.is_initialized() or torch.distributed.get_rank(
     ) == 0:

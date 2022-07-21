@@ -2,6 +2,7 @@ from .deepgoplus import DeepGOPlusModel
 from .esm_model import MLP, EsmTransformer
 from .modeling_lstm import (ContrastiveProteinLSTMModel,
                             MultilabelProteinLSTMModel, ProteinLSTMConfig)
+from .label_wise_attention import LabelWiseAttentionModel
 
 
 def get_model(args):
@@ -30,5 +31,8 @@ def get_model(args):
 
         config = ProteinLSTMConfig()
         model = ContrastiveProteinLSTMModel(config)
+    
+    if args.model == 'label_wise_attention':
+        model = LabelWiseAttentionModel()
 
     return model

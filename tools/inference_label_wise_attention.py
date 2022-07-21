@@ -1,7 +1,6 @@
 import argparse
 import logging
 import os
-import sys
 import time
 
 import pandas as pd
@@ -10,15 +9,11 @@ import torch.backends.cudnn as cudnn
 import torch.utils.data
 import torch.utils.data.distributed
 import yaml
-from torch.utils.data import DataLoader
 
-from deepfold.data.gcn_dataset import GCNDataset
-from deepfold.models.multimodal_model import ProtGCNModel
+from deepfold.data.dataset_factory import get_dataloaders
+from deepfold.models.model_factory import get_model
 from deepfold.trainer.training import predict
-from deepfold.utils.make_graph import build_graph
 from deepfold.utils.model import load_model_checkpoint
-
-sys.path.append('../')
 
 # The first arg parser parses out only the --config argument, this argument is used to
 # load a yaml file containing key-values that override the defaults for the main parser below
@@ -36,15 +31,19 @@ parser.add_argument('--data_path',
                     default='',
                     type=str,
                     help='data dir of dataset')
-parser.add_argument('--test_file_name',
+parser.add_argument('--dataset_name',
                     default='',
                     type=str,
-                    help='data dir of dataset')
-parser.add_argument('--namespace', default='', type=str, help='cc, mf, bp')
+                    help='dataset name: esm, esm_embedding, protseq, protbert')
 parser.add_argument('--model',
                     metavar='MODEL',
-                    default='protgcn',
-                    help='model architecture: (default: protgcn)')
+                    default='label_wise_attention',
+                    help='model architecture: (default: esm)')
+parser.add_argument('--num_labels',
+                    default=5874,
+                    type=int,
+                    help='num labels for multi-label classification')
+parser.add_argument('--fintune', default=False, type=bool, help='fintune model')
 parser.add_argument('--resume',
                     default=None,
                     type=str,
@@ -64,7 +63,7 @@ parser.add_argument('-j',
                     help='how many training processes to use (default: 1)')
 parser.add_argument('-b',
                     '--batch-size',
-                    default=256,
+                    default=16,
                     type=int,
                     metavar='N',
                     help='mini-batch size (default: 256) per gpu')
@@ -75,35 +74,25 @@ parser.add_argument('--output-dir',
 
 
 def main(args):
+    args.distributed = False
     args.gpu = 0
-    # Dataset and DataLoader
-    adj, multi_hot_vector, label_map, label_map_ivs = build_graph(
-        data_path=args.data_path, namespace=args.namespace)
-    test_dataset = GCNDataset(label_map,
-                              root_path=args.data_path,
-                              file_name=args.test_file_name)
     # dataloders
-    test_loader = DataLoader(test_dataset,
-                             batch_size=args.batch_size,
-                             shuffle=False,
-                             num_workers=args.workers,
-                             pin_memory=True)
-
+    # Dataset and DataLoader
+    logger.info('=> lodding test datasets:( %s, %s)' %
+                (args.data_path, args.dataset_name))
+    _, test_loader = get_dataloaders(args)
     # model
-    nodes = multi_hot_vector.cuda()
-    adj = adj.cuda()
-    model = ProtGCNModel(nodes=nodes,
-                         adjmat=adj,
-                         seq_dim=1280,
-                         node_feats=512,
-                         hidden_dim=512)
+    logger.info('=> build models %s ' % args.model)
+    model = get_model(args)
     if args.resume is not None:
         if args.local_rank == 0:
             model_state, optimizer_state = load_model_checkpoint(args.resume)
             model.load_state_dict(model_state)
 
     # define loss function (criterion) and optimizer
+    # optimizer and lr_policy
     model = model.cuda()
+
     # run predict
     predictions, test_metrics = predict(model,
                                         test_loader,
@@ -112,17 +101,15 @@ def main(args):
 
     logger.info('Test metrics: %s' % (test_metrics))
 
-    test_data_path = os.path.join(args.data_path, args.namespace,
-                                  args.namespace + '_test_data.pkl')
+    test_data_path = os.path.join(args.data_path, 'test_data.pkl')
     test_df = pd.read_pickle(test_data_path)
 
     preds, test_labels = predictions
     test_df['labels'] = list(test_labels)
     test_df['preds'] = list(preds)
-    df_path = os.path.join(args.data_path,
-                           args.namespace + '_predictions' + '_less_terms' + '.pkl')
+    df_path = os.path.join(args.data_path, args.model + '_predictions.pkl')
+    logger.info('Saveing predictions %s' % df_path)
     test_df.to_pickle(df_path)
-    logger.info(f'Saving results to {df_path}')
 
 
 def _parse_args():
@@ -147,7 +134,7 @@ if __name__ == '__main__':
     # Cache the args as a text string to save them in the output dir later
     args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
 
-    task_name = 'ProtLM' + '_' + args.namespace + '_' + args.model + 'less_terms'
+    task_name = 'ProtLM' + '_' + args.model
     args.output_dir = os.path.join(args.output_dir, task_name)
     if not torch.distributed.is_initialized() or torch.distributed.get_rank(
     ) == 0:

@@ -38,3 +38,13 @@ python  evaluate_deepmodel.py \
     --terms-file /home/niejianzheng/xbiome/DeepFold/protein_data/cafa3/process/cco_terms.pkl \
     --ontology-obo-file /home/niejianzheng/xbiome/DeepFold/protein_data/cafa3/process/go_cafa3.obo \
     --output_dir /home/niejianzheng/xbiome/DeepFold/work_dir
+
+## evaluate multi modal
+python tools/evaluate_multimodal.py 
+    --data_path data/cafa3 
+    --train-data-file data/cafa3/mfo_esm1b_t33_650M_UR50S_embeddings_mean_train.pkl 
+    --test-data-file data/cafa3/mfo_predictions1.pkl 
+    --ontology-obo-file data/cafa3/go_cafa3.obo 
+    --namespace 'mfo' 
+    --output_dir ./work_dir
+    --ont mf

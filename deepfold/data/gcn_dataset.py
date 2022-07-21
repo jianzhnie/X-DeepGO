@@ -39,6 +39,6 @@ class GCNDataset(Dataset):
     def load_dataset(self, data_path):
         df = pd.read_pickle(data_path)
         embeddings = list(df['esm_embeddings'])
-        label = list(df['prop_annotations'])
+        label = list(df['annotations'])
         assert len(embeddings) == len(label)
         return embeddings, label

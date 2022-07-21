@@ -16,7 +16,7 @@ def statistic_terms(train_data_path):
     train_data = pd.read_pickle(train_data_path)
     cnt = Counter()
     for i, row in train_data.iterrows():
-        for term in row['prop_annotations']:
+        for term in row['annotations']:
             cnt[term] += 1
     print('Number of annotated terms:', len(cnt))
     sorted_by_freq_tuples = sorted(cnt.items(), key=lambda x: x[0])
@@ -26,7 +26,7 @@ def statistic_terms(train_data_path):
 
 
 # make edges
-def make_edges(go_file, namespace='bpo', with_rels=False):
+def make_edges(go_file, namespace='bpo', with_rels=False,annotated_terms=None):
     go_ont = Ontology(go_file, with_rels=with_rels)
     if namespace == 'bpo':
         all_terms = go_ont.get_namespace_terms('biological_process')
@@ -34,6 +34,9 @@ def make_edges(go_file, namespace='bpo', with_rels=False):
         all_terms = go_ont.get_namespace_terms('molecular_function')
     elif namespace == 'cco':
         all_terms = go_ont.get_namespace_terms('cellular_component')
+    
+    if annotated_terms is not None:
+        all_terms = all_terms.intersection(set(annotated_terms))
     edges = []
     for subj in all_terms:
         objs = go_ont.get_parents(subj)
@@ -177,17 +180,11 @@ def get_all_go_cnt(edges, go_cnt, all_children, go_ic):
 
 def get_go_ic(namespace='bpo', data_path=None):
     go_file = os.path.join(data_path, 'go_cafa3.obo')
-    if namespace == 'bpo':
-        train_data_path = os.path.join(data_path, 'bpo')
-        train_data_file = os.path.join(train_data_path, 'bpo_train_data.pkl')
-    elif namespace == 'mfo':
-        train_data_path = os.path.join(data_path, 'mfo')
-        train_data_file = os.path.join(train_data_path, 'mfo_train_data.pkl')
-    elif namespace == 'cco':
-        train_data_path = os.path.join(data_path, 'cco')
-        train_data_file = os.path.join(train_data_path, 'cco_train_data.pkl')
+    train_data_file = os.path.join(data_path, namespace,
+                                   namespace + '_train_data.pkl')
     freq_dict = statistic_terms(train_data_file)
-    edges = make_edges(go_file, namespace)
+    annotated_terms = freq_dict.keys()
+    edges = make_edges(go_file, namespace,False,annotated_terms)
     all_children, alt_id = read_go_children(go_file)
     go_ic = calculate_information_contents_of_GO_terms(freq_dict, all_children,
                                                        alt_id)
@@ -196,9 +193,10 @@ def get_go_ic(namespace='bpo', data_path=None):
 
 
 if __name__ == '__main__':
-    data_path = '/home/niejianzheng/xbiome/DeepFold/protein_data/cafa3/process'
+    data_path = '../../data/cafa3'
     all_go_bpo_cnt = get_go_ic('bpo', data_path)
     print(f'edges in bpo: {len(all_go_bpo_cnt)}')
+    # print(f'nodes in bpo:{}')
     all_go_mfo_cnt = get_go_ic('mfo', data_path)
     print(f'edges in mfo: {len(all_go_mfo_cnt)}')
     all_go_cco_cnt = get_go_ic('cco', data_path)
